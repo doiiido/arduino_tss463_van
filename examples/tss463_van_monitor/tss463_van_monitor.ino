@@ -1,7 +1,7 @@
 #include <SPI.h>
 #include "VanMessageSender.h"
 
-const int VAN_PIN = 7;
+int VAN_PIN = 7;
 const VAN_NETWORK NETWORK = VAN_COMFORT;
 
 AbstractVanMessageSender *VANInterface;
@@ -12,11 +12,13 @@ SPIClass* spi;
 
 uint8_t headerByte = 0x80;
 
+unsigned long prevTime = 0;
+
 char incomingByte;
 
 void setup()
 {
-    Serial.begin(230400);
+    Serial.begin(500000);
     Serial.println("Arduino VAN bus monitor using TSS463C");
 
     // initialize SPI
@@ -29,8 +31,20 @@ void setup()
 
     #ifdef ARDUINO_ARCH_ESP32
         // You can select which pins to use as SPI on ESP32 boards by passing the SCK, MISO, MOSI, SS as arguments (in this order) to the spi->begin() method
-        //spi->begin(12, 22, 23, VAN_PIN);
-        spi->begin(13, 5, 12, VAN_PIN);
+        const uint8_t SCK_PIN = 25;
+        const uint8_t MISO_PIN = 5;
+        const uint8_t MOSI_PIN = 33;
+        VAN_PIN = 32;
+
+        spi->begin(SCK_PIN, MISO_PIN, MOSI_PIN, VAN_PIN);
+    #endif
+
+    #ifdef ARDUINO_ARCH_STM32
+        VAN_PIN = PB12;
+        spi->setMOSI(PB15);
+        spi->setMISO(PB14);
+        spi->setSCLK(PB13);
+        spi->begin();
     #endif
 
     // instantiate the VanMessageSender class passing the CS pin and the SPI instance as a dependency
@@ -40,6 +54,7 @@ void setup()
     // IMPORTANT - it does matter in which order the channels are set up for the various request types
     // This is because how priority among different channels is taken into consideration (see Page 46 in documentation for further info)
 
+    //if you would like to try out the VAN sending functions then disable the following channel setups
     van_setup_channel(0); //#1 reply request message
     van_setup_channel(1); //#2 receive message
     van_setup_channel(2); //#3 reply request without transmission message
@@ -110,7 +125,36 @@ void AnswerToCDC()
     VANInterface->set_channel_for_immediate_reply_message(8, 0x4EC, packet, 12);
 }
 
+/*
+    When the display detects a button press message it will ask for the trip data, which we will answer with the next method
+*/
+void TripButtonPressed()
+{
+    uint8_t packetTrip[2] = { 0x12, 0x08 };
+    VANInterface->set_channel_for_transmit_message(3, 0x8C4, packetTrip, 2, 1);
+}
+
+/*
+    When the display asks for the trip data, this answer is sent by the BSI
+*/
+void AnswerToTripData(uint8_t tripButton)
+{
+    headerByte = (headerByte == 0x87) ? 0x80 : headerByte + 1;
+
+    uint8_t packet[27] = { headerByte, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, tripButton, 0x00, 0x36, 0x06, 0x00, 0x00, 0xFF, 0xFF, 0x0D, 0x29, 0x00, 0x40, 0xFF, 0xFF, 0xFF, 0xFF, headerByte };
+    VANInterface->set_channel_for_immediate_reply_message(8, 0x564, packet, 27);
+}
+
 void loop() {
+    
+    unsigned long currentTime = millis();
+
+/*
+    if (currentTime - prevTime > 20){
+      prevTime = currentTime;
+      SendExternalTemperature(10);
+    }
+*/
     if (Serial.available()>0)
     {
         int inChar = Serial.read();
@@ -138,10 +182,21 @@ void loop() {
                 AnswerToCDC();
                 break;
             }
+            case 'r': {
+                TripButtonPressed();
+                AnswerToTripData(0x51);
+                delay(20);
+
+                TripButtonPressed();
+                AnswerToTripData(0x50);
+                break;
+            }
             default:
                 break;
         }
     }
+
+    //if you would like to try out the VAN sending functions then disable the following loop
     for (uint8_t channel = 0; channel < 4; channel++)
     {
         MessageLengthAndStatusRegister messageAvailable = VANInterface->message_available(channel);
